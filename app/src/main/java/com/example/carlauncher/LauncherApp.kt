@@ -46,7 +46,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -56,33 +55,22 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.edit
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.net.toUri
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.LifecycleOwner
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
-import kotlin.time.Duration.Companion.minutes
-import kotlin.time.Duration.Companion.seconds
 
 @Composable
 fun LauncherApp() {
@@ -90,11 +78,13 @@ fun LauncherApp() {
     val prefs = remember { ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE) }
 
     var carId by remember { mutableStateOf(prefs.getString("car", "orange") ?: "orange") }
+    var ownerName by remember { mutableStateOf(prefs.getString("owner_name", "Demo") ?: "Demo") }
     var night by remember { mutableStateOf(prefs.getBoolean("night", true)) }
-    var showPicker by remember { mutableStateOf(false) }
+    var style by remember { mutableStateOf(prefs.getString("style", "demo") ?: "demo") }
+    var showSettings by remember { mutableStateOf(false) }
     var showApps by remember { mutableStateOf(false) }
     var pickRadio by remember { mutableStateOf(false) }
-    var power by remember { mutableStateOf(true) }
+    var animating by remember { mutableStateOf(prefs.getBoolean("animating", true)) }
 
     val car = CarColors.firstOrNull { it.id == carId } ?: CarColors.first()
     val theme = remember(carId, night) { buildTheme(car, night) }
@@ -110,48 +100,28 @@ fun LauncherApp() {
     LaunchedEffect(Unit) {
         permLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         media.start()
-        launch {
-            while (true) {
-                media.tick()
-                telemetry.checkStale()
-                delay(1.seconds)
-            }
-        }
-        // Weather: retry every 15 s until it works, then refresh every 30 min.
-        // If a later refresh fails, the last good values stay on screen.
-        launch {
-            while (true) {
-                val result = fetchWeather(WEATHER_LAT, WEATHER_LON)
-                if (result is WeatherState.Ok || weather !is WeatherState.Ok) {
-                    weather = result
-                }
-                delay(if (result is WeatherState.Ok) 30.minutes else 15.seconds)
-            }
-        }
     }
-
     DisposableEffect(Unit) {
-        onDispose {
-            telemetry.stop()
-            media.stop()
+        onDispose { telemetry.stop(); media.stop() }
+    }
+    LaunchedEffect(Unit) {
+        while (true) { media.tick(); telemetry.checkStale(); delay(1000) }
+    }
+
+    // Weather: retry every 15 s until it works, then refresh every 30 min.
+    // If a later refresh fails, the last good values stay on screen.
+    LaunchedEffect(Unit) {
+        while (true) {
+            val result = fetchWeather(WEATHER_LAT, WEATHER_LON)
+            if (result is WeatherState.Ok || weather !is WeatherState.Ok) weather = result
+            delay(if (result is WeatherState.Ok) 30 * 60 * 1000L else 15_000L)
         }
     }
 
-    BackHandler(enabled = showApps || showPicker) {
+    BackHandler(enabled = showApps || showSettings) {
         showApps = false
-        showPicker = false
+        showSettings = false
         pickRadio = false
-    }
-
-    // Car drives out when you leave the launcher, and drives in when you come back
-    DisposableEffect(ctx) {
-        val owner = ctx as? LifecycleOwner
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) power = false
-            if (event == Lifecycle.Event.ON_START) power = true
-        }
-        owner?.lifecycle?.addObserver(observer)
-        onDispose { owner?.lifecycle?.removeObserver(observer) }
     }
 
     // Opens the radio app. If none is found, lets the user choose one.
@@ -183,7 +153,7 @@ fun LauncherApp() {
                     theme = theme,
                     title = if (pickRadio) "Choose your radio app" else "All apps",
                     onPick = if (pickRadio) { pkg ->
-                        prefs.edit { putString("radio_pkg", pkg) }
+                        prefs.edit().putString("radio_pkg", pkg).apply()
                         pickRadio = false
                         showApps = false
                         ctx.packageManager.getLaunchIntentForPackage(pkg)?.let { ctx.startSafely(it) }
@@ -191,56 +161,93 @@ fun LauncherApp() {
                     onClose = { showApps = false; pickRadio = false }
                 )
             } else {
-                Column(Modifier.fillMaxSize()) {
-                    TopBar(
-                        theme,
-                        power = power,
-                        onPower = { power = !power },
+                if (style == "drive") {
+                    DriveHome(
+                        theme = theme,
+                        telemetry = telemetry,
+                        media = media,
+                        weather = weather,
+                        animating = animating,
+                        onAnimating = {
+                            animating = !animating
+                            prefs.edit().putBoolean("animating", animating).apply()
+                        },
                         onRadio = openRadio,
+                        onRadioLong = { pickRadio = true; showApps = true },
                         onTheme = {
                             night = !night
-                            prefs.edit { putBoolean("night", night) }
+                            prefs.edit().putBoolean("night", night).apply()
                         },
-                        onPalette = { showPicker = !showPicker }
+                        onSettings = { showSettings = !showSettings },
+                        onApps = { pickRadio = false; showApps = true }
                     )
-                    Spacer(Modifier.height(12.dp))
-                    Row(Modifier.weight(1f).fillMaxWidth()) {
-                        SpeedCard(theme, telemetry, Modifier.weight(0.9f).fillMaxHeight())
-                        Spacer(Modifier.width(14.dp))
-                        Column(Modifier.weight(2.2f).fillMaxHeight()) {
-                            Row(Modifier.fillMaxWidth().height(110.dp)) {
-                                MusicCard(theme, media, Modifier.weight(1.5f).fillMaxHeight())
-                                Spacer(Modifier.width(14.dp))
-                                WeatherCard(theme, weather, Modifier.weight(1f).fillMaxHeight())
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        TopBar(
+                            theme,
+                            animating = animating,
+                            ownerName = ownerName,
+                            onAnimating = {
+                                animating = !animating
+                                prefs.edit().putBoolean("animating", animating).apply()
+                            },
+                            onRadio = openRadio,
+                            onTheme = {
+                                night = !night
+                                prefs.edit().putBoolean("night", night).apply()
+                            },
+                            onSettings = { showSettings = !showSettings }
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Row(Modifier.weight(1f).fillMaxWidth()) {
+                            SpeedCard(theme, telemetry, Modifier.weight(0.9f).fillMaxHeight())
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(2.2f).fillMaxHeight()) {
+                                Row(Modifier.fillMaxWidth().height(110.dp)) {
+                                    MusicCard(theme, media, Modifier.weight(1.5f).fillMaxHeight())
+                                    Spacer(Modifier.width(14.dp))
+                                    WeatherCard(theme, weather, Modifier.weight(1f).fillMaxHeight())
+                                }
+                                CarImage(
+                                    theme,
+                                    Modifier.weight(1f).fillMaxWidth(),
+                                    lightsOn = night,
+                                    animating = animating,
+                                    gpsSpeed = telemetry.speed
+                                )
                             }
-                            CarImage(
-                                theme,
-                                Modifier.weight(1f).fillMaxWidth(),
-                                lightsOn = night,
-                                power = power,
-                                gpsSpeed = telemetry.speed
-                            )
                         }
+                        Spacer(Modifier.height(12.dp))
+                        Dock(
+                            theme,
+                            onApps = { pickRadio = false; showApps = true },
+                            onRadio = openRadio,
+                            onRadioLong = { pickRadio = true; showApps = true }
+                        )
                     }
-                    Spacer(Modifier.height(12.dp))
-                    Dock(
-                        theme,
-                        onApps = { pickRadio = false; showApps = true },
-                        onRadio = openRadio,
-                        onRadioLong = { pickRadio = true; showApps = true }
-                    )
                 }
 
-                if (showPicker) {
-                    ThemePicker(
+                if (showSettings) {
+                    SettingsPopup(
                         theme = theme,
-                        selectedId = carId,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(top = 64.dp)
-                    ) { id ->
-                        carId = id
-                        prefs.edit { putString("car", id) }
-                        showPicker = false
-                    }
+                        selectedCarId = carId,
+                        ownerName = ownerName,
+                        style = style,
+                        onStyleSelected = { s ->
+                            style = s
+                            prefs.edit().putString("style", s).apply()
+                        },
+                        onCarSelected = { id ->
+                            carId = id
+                            prefs.edit().putString("car", id).apply()
+                        },
+                        onOwnerNameChange = { name ->
+                            ownerName = name
+                            prefs.edit().putString("owner_name", name).apply()
+                        },
+                        onClose = { showSettings = false },
+                        modifier = Modifier.align(Alignment.TopEnd).padding(top = 64.dp, end = 10.dp)
+                    )
                 }
             }
         }
@@ -252,20 +259,54 @@ fun LauncherApp() {
 @Composable
 fun TopBar(
     theme: CarTheme,
-    power: Boolean,
-    onPower: () -> Unit,
+    animating: Boolean,
+    ownerName: String,
+    onAnimating: () -> Unit,
     onRadio: () -> Unit,
     onTheme: () -> Unit,
-    onPalette: () -> Unit
+    onSettings: () -> Unit
 ) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) { now = System.currentTimeMillis(); delay(1000) }
+    }
+
+    val dateFmt = remember { SimpleDateFormat("EEEE, d MMMM", Locale.ENGLISH) }
+    val timeFmt = remember { SimpleDateFormat("hh:mm", Locale.ENGLISH) }
+    val meridiemFmt = remember { SimpleDateFormat("a", Locale.ENGLISH) }
+
+    val hour = Calendar.getInstance().apply { timeInMillis = now }.get(Calendar.HOUR_OF_DAY)
+    val baseGreeting = when (hour) {
+        in 5..11 -> "Good morning"
+        in 12..16 -> "Good afternoon"
+        in 17..20 -> "Good evening"
+        else -> "Good night"
+    }
+    val greeting = if (ownerName.isNotBlank()) "$baseGreeting, $ownerName" else baseGreeting
+    val date = dateFmt.format(Date(now))
+    val time = timeFmt.format(Date(now))
+    val meridiem = meridiemFmt.format(Date(now))
+
     Box(Modifier.fillMaxWidth().height(56.dp)) {
-        GreetingDisplay(theme, Modifier.align(Alignment.CenterStart))
-        TimeDisplay(theme, Modifier.align(Alignment.Center))
+        Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Home, null, tint = theme.subText, modifier = Modifier.size(26.dp))
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(greeting, color = theme.text, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                Text(date, color = theme.subText, fontSize = 12.sp)
+            }
+        }
+        Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.Bottom) {
+            Text(time, color = theme.text, fontSize = 40.sp, fontWeight = FontWeight.Light)
+            Spacer(Modifier.width(4.dp))
+            Text(meridiem, color = theme.subText, fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
+        }
         Row(Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
-            PillButton(theme, onClick = onPower) {
+            PillButton(theme, onClick = onAnimating) {
                 Icon(
-                    Icons.Filled.PowerSettingsNew, null,
-                    tint = if (power) theme.accent else theme.subText,
+                    if (animating) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    null,
+                    tint = if (animating) theme.accent else theme.subText,
                     modifier = Modifier.size(22.dp)
                 )
             }
@@ -274,8 +315,8 @@ fun TopBar(
                 Icon(Icons.Filled.Radio, null, tint = theme.text, modifier = Modifier.size(22.dp))
             }
             Spacer(Modifier.width(10.dp))
-            PillButton(theme, onClick = onPalette) {
-                Icon(Icons.Filled.Palette, null, tint = theme.accent, modifier = Modifier.size(22.dp))
+            PillButton(theme, onClick = onSettings) {
+                Icon(Icons.Filled.Settings, null, tint = theme.accent, modifier = Modifier.size(22.dp))
             }
             Spacer(Modifier.width(10.dp))
             PillButton(theme, wide = true, onClick = onTheme) {
@@ -284,60 +325,6 @@ fun TopBar(
                 Text(theme.name, color = theme.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
         }
-    }
-}
-
-@Composable
-private fun GreetingDisplay(theme: CarTheme, modifier: Modifier = Modifier) {
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            now = System.currentTimeMillis()
-            delay(1.seconds)
-        }
-    }
-    val dateFmt = remember { SimpleDateFormat("EEEE, d MMMM", Locale.ENGLISH) }
-    val cal = remember { Calendar.getInstance() }
-    cal.timeInMillis = now
-    val hour = cal.get(Calendar.HOUR_OF_DAY)
-    val greeting = when (hour) {
-        in 5..11 -> "Good morning"
-        in 12..16 -> "Good afternoon"
-        in 17..20 -> "Good evening"
-        else -> "Good night"
-    }
-    val day = cal.get(Calendar.DAY_OF_YEAR)
-    val date = remember(day) { dateFmt.format(Date(now)) }
-
-    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Filled.Home, null, tint = theme.subText, modifier = Modifier.size(26.dp))
-        Spacer(Modifier.width(12.dp))
-        Column {
-            Text(greeting, color = theme.text, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-            Text(date, color = theme.subText, fontSize = 12.sp)
-        }
-    }
-}
-
-@Composable
-private fun TimeDisplay(theme: CarTheme, modifier: Modifier = Modifier) {
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            now = System.currentTimeMillis()
-            delay(1.seconds)
-        }
-    }
-    val timeFmt = remember { SimpleDateFormat("hh:mm", Locale.ENGLISH) }
-    val meridiemFmt = remember { SimpleDateFormat("a", Locale.ENGLISH) }
-    val minuteBucket = now / 60_000
-    val time = remember(minuteBucket) { timeFmt.format(Date(now)) }
-    val meridiem = remember(minuteBucket) { meridiemFmt.format(Date(now)) }
-
-    Row(modifier, verticalAlignment = Alignment.Bottom) {
-        Text(time, color = theme.text, fontSize = 40.sp, fontWeight = FontWeight.Light)
-        Spacer(Modifier.width(4.dp))
-        Text(meridiem, color = theme.subText, fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
     }
 }
 
@@ -363,54 +350,145 @@ fun PillButton(
     )
 }
 
-/* ---------------- THEME PICKER ---------------- */
+/* ---------------- SETTINGS POPUP ---------------- */
 
 @Composable
-fun ThemePicker(
+fun SettingsPopup(
     theme: CarTheme,
-    selectedId: String,
-    modifier: Modifier,
-    onPick: (String) -> Unit
+    selectedCarId: String,
+    ownerName: String,
+    style: String,
+    onStyleSelected: (String) -> Unit,
+    onCarSelected: (String) -> Unit,
+    onOwnerNameChange: (String) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Row(
+    Box(
         modifier
-            .shadow(12.dp, RoundedCornerShape(20.dp))
-            .clip(RoundedCornerShape(20.dp))
+            .shadow(16.dp, RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(24.dp))
             .background(theme.card)
-            .border(1.dp, theme.track, RoundedCornerShape(20.dp))
-            .padding(14.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp)
+            .border(1.dp, theme.track, RoundedCornerShape(24.dp))
+            .width(340.dp)
+            .padding(20.dp)
     ) {
-        CarColors.forEach { c ->
-            val selected = c.id == selectedId
-            Column(
-                Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { onPick(c.id) }
-                    .padding(4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            // Header
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    Modifier
-                        .size(44.dp)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Filled.Settings, null, tint = theme.accent, modifier = Modifier.size(20.dp))
+                    Text("Settings", color = theme.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Close",
+                    tint = theme.subText,
+                    modifier = Modifier
+                        .size(24.dp)
                         .clip(CircleShape)
-                        .background(c.accent)
-                        .border(
-                            if (selected) 3.dp else 1.dp,
-                            if (selected) theme.text else theme.track,
-                            CircleShape
-                        )
+                        .clickable(onClick = onClose)
                 )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    c.label,
-                    color = if (selected) theme.text else theme.subText,
-                    fontSize = 11.sp
+            }
+
+            // Section 1: Pick a theme
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("1. Pick a Theme", color = theme.subText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                listOf(
+                    Triple("demo", "Demo Style", "Default launcher theme"),
+                    Triple("drive", "Drive Style", "Big speedometer, Where to? card")
+                ).forEach { (id, name, desc) ->
+                    val sel = style == id
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (sel) theme.accent.copy(alpha = 0.12f) else theme.background)
+                            .border(
+                                if (sel) 2.dp else 1.dp,
+                                if (sel) theme.accent else theme.track,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .clickable { onStyleSelected(id) }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(name, color = theme.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text(desc, color = theme.subText, fontSize = 11.sp)
+                        }
+                        if (sel) Text("Active", color = theme.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // Section 2: Vehicle colour
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("2. Vehicle Colour", color = theme.subText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    CarColors.forEach { c ->
+                        val selected = c.id == selectedCarId
+                        Column(
+                            Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onCarSelected(c.id) }
+                                .padding(4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(c.accent)
+                                    .border(
+                                        if (selected) 2.dp else 1.dp,
+                                        if (selected) theme.text else theme.track,
+                                        CircleShape
+                                    )
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                c.label,
+                                color = if (selected) theme.text else theme.subText,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Section 3: Owner Name
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("3. Owner Name", color = theme.subText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                androidx.compose.material3.OutlinedTextField(
+                    value = ownerName,
+                    onValueChange = onOwnerNameChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("Enter owner name", color = theme.subText) },
+                    textStyle = androidx.compose.ui.text.TextStyle(color = theme.text, fontSize = 14.sp),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = theme.accent,
+                        unfocusedBorderColor = theme.track,
+                        focusedTextColor = theme.text,
+                        unfocusedTextColor = theme.text,
+                        cursorColor = theme.accent
+                    ),
+                    shape = RoundedCornerShape(12.dp)
                 )
             }
         }
     }
 }
+
 
 /* ---------------- SPEED CARD ---------------- */
 
@@ -439,7 +517,7 @@ fun SpeedCard(theme: CarTheme, t: Telemetry, modifier: Modifier) {
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Stat(theme, "TRIP", "${t.tripKm.roundToInt()} km")
+                Stat(theme, "TRIP", "${"%.0f".format(t.tripKm)} km")
                 Stat(theme, "DRIVE", "${t.driveMin} min")
                 Stat(theme, "HEADING", t.heading)
             }
@@ -455,41 +533,28 @@ fun Stat(theme: CarTheme, label: String, value: String) {
     }
 }
 
-private data class GaugeSegmentStyle(
-    val stroke: Stroke,
-    val inset: Float
-)
-
 @Composable
 fun Gauge(theme: CarTheme, speed: Int, modifier: Modifier, max: Int = 180) {
-    val density = LocalDensity.current
-    val strokeWidthPx = remember(density) { with(density) { 16.dp.toPx() } }
-    val segments = 40
-    val segmentStyles = remember(strokeWidthPx) {
-        List(segments) { i ->
-            val grow = 0.55f + 0.45f * (i / segments.toFloat())
-            val w = strokeWidthPx * grow
-            val inset = strokeWidthPx / 2 + (strokeWidthPx - w) / 2
-            GaugeSegmentStyle(Stroke(width = w), inset)
-        }
-    }
-
     Box(modifier) {
         Canvas(Modifier.fillMaxSize()) {
+            val stroke = 16.dp.toPx()
+            val segments = 40
             val start = 135f
             val sweep = 270f
             val per = sweep / segments
             val active = ((speed.coerceIn(0, max).toFloat() / max) * segments).toInt()
             for (i in 0 until segments) {
-                val s = segmentStyles[i]
+                val grow = 0.55f + 0.45f * (i / segments.toFloat())
+                val w = stroke * grow
+                val inset = stroke / 2 + (stroke - w) / 2
                 drawArc(
                     color = if (i < active) theme.accent else theme.track,
                     startAngle = start + i * per,
                     sweepAngle = per - 2.2f,
                     useCenter = false,
-                    topLeft = Offset(s.inset, s.inset),
-                    size = Size(size.width - s.inset * 2, size.height - s.inset * 2),
-                    style = s.stroke
+                    topLeft = Offset(inset, inset),
+                    size = Size(size.width - inset * 2, size.height - inset * 2),
+                    style = Stroke(width = w)
                 )
             }
         }
@@ -575,10 +640,7 @@ fun MusicCard(theme: CarTheme, m: MediaState, modifier: Modifier) {
 
 private fun fmt(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0)
-    val m = s / 60
-    val sec = s % 60
-    val secStr = if (sec < 10) "0$sec" else "$sec"
-    return "$m:$secStr"
+    return "%d:%02d".format(s / 60, s % 60)
 }
 
 private fun askNotificationAccess(ctx: Context) {
@@ -589,16 +651,12 @@ private fun askNotificationAccess(ctx: Context) {
 
 @Composable
 fun WeatherCard(theme: CarTheme, state: WeatherState, modifier: Modifier) {
-    val temps = remember(state) {
-        (state as? WeatherState.Ok)?.data?.let { "${it.high}° / ${it.low}°" } ?: "--° / --°"
-    }
-    val info = remember(state) {
-        when (state) {
-            is WeatherState.Ok ->
-                "Now ${state.data.now}°  •  ${state.data.condition}  •  Sunset ${state.data.sunset}"
-            is WeatherState.Error -> "${state.message}  •  retrying…"
-            WeatherState.Loading -> "Loading…"
-        }
+    val temps = (state as? WeatherState.Ok)?.data?.let { "${it.high}° / ${it.low}°" } ?: "--° / --°"
+    val info = when (state) {
+        is WeatherState.Ok ->
+            "Now ${state.data.now}°  •  ${state.data.condition}  •  Sunset ${state.data.sunset}"
+        is WeatherState.Error -> "${state.message}  •  retrying…"
+        WeatherState.Loading -> "Loading…"
     }
     CardBox(theme, modifier) {
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
@@ -639,20 +697,30 @@ fun CarImage(
     theme: CarTheme,
     modifier: Modifier,
     lightsOn: Boolean = true,
-    power: Boolean = true,
+    animating: Boolean = true,
     gpsSpeed: Int = 0
 ) {
     // -1.05 = just off-screen left, 0 = middle, +1.05 = just off-screen right
     val offset = remember { Animatable(-1.05f) }
     var shownImage by remember { mutableIntStateOf(theme.carImage) }
     var wasOff by remember { mutableStateOf(false) }
+    var wasPaused by remember { mutableStateOf(false) }
 
     val accelerate = CubicBezierEasing(0.55f, 0f, 0.9f, 0.5f)
 
-    LaunchedEffect(theme.carImage, power) {
-        if (!power) {
-            wasOff = true
-            offset.animateTo(1.05f, tween(1400, easing = accelerate))
+    LaunchedEffect(theme.carImage, animating) {
+        if (!animating) {
+            wasPaused = true
+            wasOff = false
+            shownImage = theme.carImage
+            offset.animateTo(0f, tween(500, easing = FastOutSlowInEasing))
+            return@LaunchedEffect
+        }
+        if (wasPaused) {
+            offset.snapTo(-1.05f)
+            wasPaused = false
+            shownImage = theme.carImage
+            offset.animateTo(0f, tween(1900, easing = FastOutSlowInEasing))
             return@LaunchedEffect
         }
         if (wasOff) {
@@ -669,24 +737,26 @@ fun CarImage(
     // Smoothed speed: follows the speedometer, but eases up and down
     // so the wind builds up and dies away gradually.
     val smoothSpeed = animateFloatAsState(
-        targetValue = if (power) gpsSpeed.toFloat() else 0f,
+        targetValue = if (animating) gpsSpeed.toFloat() else 0f,
         animationSpec = tween(1200, easing = LinearOutSlowInEasing),
         label = "windSpeed"
     )
 
     // 0..1 wind strength from speed (140 km/h and above = maximum)
     val windRaw: () -> Float = {
-        val s = smoothSpeed.value
-        if (s < 0.5f) 0f else (s / 140f).coerceIn(0f, 1f)
+        if (!animating) 0f else {
+            val s = smoothSpeed.value
+            if (s < 0.5f) 0f else (s / 140f).coerceIn(0f, 1f)
+        }
     }
     // Same value on a curve that makes low speeds easier to see
     val windVisual: () -> Float = { sqrt(windRaw()) }
 
-    // Animation clock: runs only when the vehicle is moving to preserve CPU and battery.
+    // Animation clock: its speed is proportional to the real speed.
+    // Speed 0 means the clock stops and everything freezes.
     var phase by remember { mutableFloatStateOf(0f) }
-    val isMoving = smoothSpeed.value >= 0.5f
-    LaunchedEffect(isMoving) {
-        if (!isMoving) return@LaunchedEffect
+    LaunchedEffect(animating) {
+        if (!animating) return@LaunchedEffect
         var last = 0L
         while (true) {
             withFrameNanos { now ->
@@ -714,7 +784,7 @@ fun CarImage(
     }
 
     val lightsLevel by animateFloatAsState(
-        targetValue = if (power && lightsOn) 1f else 0f,
+        targetValue = if (lightsOn) 1f else 0f,
         animationSpec = tween(700),
         label = "lightsLevel"
     )
@@ -734,7 +804,6 @@ fun CarImage(
         if (it.width > 0f && it.height > 0f) it.width / it.height else 2.2f
     }
     val windColor = if (theme.name == "NIGHT") Color.White else theme.subText
-    val beamPath = remember { Path() }
 
     BoxWithConstraints(modifier.clipToBounds(), contentAlignment = Alignment.BottomCenter) {
         val parentPx = constraints.maxWidth.toFloat()
@@ -833,7 +902,6 @@ fun CarImage(
                         alpha = lightsLevel * (1f - abs(offset.value)).coerceIn(0f, 1f)
                     }
             ) {
-                if (lightsLevel <= 0.01f) return@Canvas
                 val w = size.width
                 val h = size.height
 
@@ -841,15 +909,15 @@ fun CarImage(
                 val hy = h * HEAD_Y
                 val beamLen = w * 0.38f
                 val spread = h * 0.24f
-                beamPath.rewind()
-                beamPath.moveTo(hx, hy - h * 0.025f)
-                beamPath.lineTo(hx + beamLen, hy - spread)
-                beamPath.lineTo(hx + beamLen, hy + spread)
-                beamPath.lineTo(hx, hy + h * 0.025f)
-                beamPath.close()
-
+                val beam = Path().apply {
+                    moveTo(hx, hy - h * 0.025f)
+                    lineTo(hx + beamLen, hy - spread)
+                    lineTo(hx + beamLen, hy + spread)
+                    lineTo(hx, hy + h * 0.025f)
+                    close()
+                }
                 drawPath(
-                    path = beamPath,
+                    path = beam,
                     brush = Brush.horizontalGradient(
                         colors = listOf(
                             Color(0xFFFFF3D0).copy(alpha = 0.55f * pulse),
@@ -926,18 +994,16 @@ fun Dock(
     onRadioLong: () -> Unit
 ) {
     val ctx = LocalContext.current
-    val items = remember {
-        listOf(
-            DockItem("Navigation", Icons.Filled.Navigation, badge = true),
-            DockItem("Music", Icons.Filled.MusicNote),
-            DockItem("Video", Icons.Filled.OndemandVideo, badge = true, dim = true),
-            DockItem("Phone", Icons.Filled.Phone),
-            DockItem("Radio", Icons.Filled.Radio),
-            DockItem("Connectivity", Icons.Filled.Public),
-            DockItem("Settings", Icons.Filled.Settings),
-            DockItem("Apps", Icons.Filled.Apps)
-        )
-    }
+    val items = listOf(
+        DockItem("Navigation", Icons.Filled.Navigation, badge = true),
+        DockItem("Music", Icons.Filled.MusicNote),
+        DockItem("Video", Icons.Filled.OndemandVideo, badge = true, dim = true),
+        DockItem("Phone", Icons.Filled.Phone),
+        DockItem("Radio", Icons.Filled.Radio),
+        DockItem("Connectivity", Icons.Filled.Public),
+        DockItem("Settings", Icons.Filled.Settings),
+        DockItem("Apps", Icons.Filled.Apps)
+    )
     var selected by remember { mutableStateOf("Navigation") }
 
     Row(
@@ -1004,12 +1070,6 @@ fun Dock(
 
 /* ---------------- APP DRAWER ---------------- */
 
-private data class AppItem(
-    val label: String,
-    val icon: ImageBitmap,
-    val packageName: String
-)
-
 @Composable
 fun AppDrawer(
     theme: CarTheme,
@@ -1018,21 +1078,19 @@ fun AppDrawer(
     onClose: () -> Unit
 ) {
     val ctx = LocalContext.current
-    val apps by produceState(initialValue = emptyList()) {
-        value = withContext(Dispatchers.IO) {
-            val pm = ctx.packageManager
-            val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            pm.queryIntentActivities(i, 0)
-                .filter { it.activityInfo.packageName != ctx.packageName }
-                .sortedBy { it.loadLabel(pm).toString().lowercase() }
-                .map {
-                    AppItem(
-                        label = it.loadLabel(pm).toString(),
-                        icon = it.loadIcon(pm).toBitmap(96, 96).asImageBitmap(),
-                        packageName = it.activityInfo.packageName
-                    )
-                }
-        }
+    val apps = remember {
+        val pm = ctx.packageManager
+        val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        pm.queryIntentActivities(i, 0)
+            .filter { it.activityInfo.packageName != ctx.packageName }
+            .sortedBy { it.loadLabel(pm).toString().lowercase() }
+            .map {
+                Triple(
+                    it.loadLabel(pm).toString(),
+                    it.loadIcon(pm).toBitmap(96, 96).asImageBitmap(),
+                    it.activityInfo.packageName
+                )
+            }
     }
     Column(Modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1045,21 +1103,21 @@ fun AppDrawer(
         }
         Spacer(Modifier.height(12.dp))
         LazyVerticalGrid(columns = GridCells.Adaptive(96.dp), modifier = Modifier.fillMaxSize()) {
-            items(apps, key = { it.packageName }, contentType = { "app" }) { app ->
+            items(apps) { (label, icon, pkg) ->
                 Column(
                     Modifier
                         .padding(8.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .clickable {
-                            if (onPick != null) onPick(app.packageName)
-                            else ctx.packageManager.getLaunchIntentForPackage(app.packageName)?.let { ctx.startSafely(it) }
+                            if (onPick != null) onPick(pkg)
+                            else ctx.packageManager.getLaunchIntentForPackage(pkg)?.let { ctx.startSafely(it) }
                         }
                         .padding(8.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Image(app.icon, null, modifier = Modifier.size(56.dp))
+                    Image(icon, null, modifier = Modifier.size(56.dp))
                     Spacer(Modifier.height(4.dp))
-                    Text(app.label, color = theme.text, fontSize = 11.sp, maxLines = 1, textAlign = TextAlign.Center)
+                    Text(label, color = theme.text, fontSize = 11.sp, maxLines = 1, textAlign = TextAlign.Center)
                 }
             }
         }
