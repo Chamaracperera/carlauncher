@@ -2,8 +2,6 @@ package com.example.carlauncher
 
 import android.content.Intent
 import android.os.Bundle
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,23 +16,21 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -43,74 +39,119 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.MapView
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
-import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
 
-/* ================= DRIVE THEME: MAIN LAYOUT ================= */
+/* ================= STYLE DEFINITION ================= */
 
-@Composable
-fun DriveHome(
-    theme: CarTheme,
-    telemetry: Telemetry,
-    weather: WeatherState,
-    animating: Boolean,
-    onAnimating: () -> Unit,
-    onRadio: () -> Unit,
-    onRadioLong: () -> Unit,
-    onTheme: () -> Unit,
-    onSettings: () -> Unit,
-    onApps: () -> Unit
-) {
+object CockpitStyle : DashboardStyle {
+    override val id = "drive"         // keep: already saved in users' prefs
+    override val label = "Cockpit"
+    override val description = "Big speedo & map"
+    override val icon: ImageVector = Icons.Filled.Speed
+
+    override fun background(theme: CarTheme): Modifier = cockpitBackground(theme)
+
+    @Composable
+    override fun Content(theme: CarTheme, env: DashboardEnv) = CockpitHome(theme, env)
+}
+
+/* ================= BACKGROUND ================= */
+/* Red ambient glows + speed-burst spokes around the gauge + dark vignette. */
+
+private fun cockpitBackground(theme: CarTheme): Modifier = Modifier.drawWithCache {
     val night = theme.name == "NIGHT"
     val k = if (night) 1f else 0.4f
-    val padPx = with(LocalDensity.current) { 18.dp.toPx() } // matches the padding in LauncherApp
+    val tint = if (night) Color.White else Color.Black
+    val w = size.width
+    val h = size.height
+    val full = Size(w, h)
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .drawBehind {
-                // red ambient glow behind everything (extends under the outer padding)
-                val tl = Offset(-padPx, -padPx)
-                val sz = Size(size.width + padPx * 2, size.height + padPx * 2)
-                drawRect(
-                    Brush.radialGradient(
-                        listOf(theme.accent.copy(alpha = 0.42f * k), Color.Transparent),
-                        center = Offset(size.width * 0.16f, size.height * 0.62f),
-                        radius = size.width * 0.55f
-                    ), tl, sz
-                )
-                drawRect(
-                    Brush.radialGradient(
-                        listOf(theme.accent.copy(alpha = 0.14f * k), Color.Transparent),
-                        center = Offset(size.width * 0.96f, size.height * 0.02f),
-                        radius = size.width * 0.4f
-                    ), tl, sz
-                )
-            }
-    ) {
-        DriveTopBar(theme, animating, onAnimating, onTheme, onSettings)
+    val glowLeft = Brush.radialGradient(
+        listOf(theme.accent.copy(alpha = 0.42f * k), Color.Transparent),
+        center = Offset(w * 0.16f, h * 0.62f), radius = w * 0.55f
+    )
+    val glowRight = Brush.radialGradient(
+        listOf(theme.accent.copy(alpha = 0.14f * k), Color.Transparent),
+        center = Offset(w * 0.96f, h * 0.02f), radius = w * 0.4f
+    )
+    val vignette = Brush.radialGradient(
+        listOf(Color.Transparent, Color.Black.copy(alpha = if (night) 0.45f else 0.10f)),
+        center = Offset(w * 0.5f, h * 0.5f), radius = w * 0.75f
+    )
+
+    // spokes radiating from the speedometer centre
+    val gc = Offset(w * 0.31f, h * 0.46f)
+    val r0 = h * 0.36f
+    val r1 = h * 1.1f
+    val spokeCount = 28
+    val spokes = List(spokeCount) { i ->
+        val a = Math.toRadians(360.0 * i / spokeCount)
+        val cs = cos(a).toFloat()
+        val sn = sin(a).toFloat()
+        Offset(gc.x + cs * r0, gc.y + sn * r0) to Offset(gc.x + cs * r1, gc.y + sn * r1)
+    }
+    val spokeBrush = Brush.radialGradient(
+        listOf(Color.Transparent, theme.accent.copy(alpha = 0.16f * k), Color.Transparent),
+        center = gc, radius = r1
+    )
+    val spokeWidth = 1.dp.toPx()
+
+    // a few horizontal speed lines on the right
+    val hLines = List(4) { i ->
+        val y = h * (0.20f + 0.07f * i)
+        val x0 = w * (0.62f + 0.05f * (i % 2))
+        Triple(y, x0, w * 0.97f)
+    }
+    val hBrush = Brush.horizontalGradient(
+        listOf(Color.Transparent, tint.copy(alpha = 0.14f * k), Color.Transparent),
+        startX = w * 0.6f, endX = w
+    )
+    val hWidth = 1.5.dp.toPx()
+
+    onDrawBehind {
+        drawRect(glowLeft, size = full)
+        drawRect(glowRight, size = full)
+        spokes.forEach { (a, b) -> drawLine(spokeBrush, a, b, strokeWidth = spokeWidth) }
+        hLines.forEach { (y, x0, x1) ->
+            drawLine(hBrush, Offset(x0, y), Offset(x1, y), strokeWidth = hWidth, cap = StrokeCap.Round)
+        }
+        drawRect(vignette, size = full)
+    }
+}
+
+/* ================= HOME LAYOUT ================= */
+
+@Composable
+private fun CockpitHome(theme: CarTheme, env: DashboardEnv) {
+    val state = env.state
+    val telemetry = env.telemetry
+
+    Column(Modifier.fillMaxSize()) {
+        CockpitTopBar(theme, state, env.onSettings)
         Spacer(Modifier.height(8.dp))
         Row(Modifier.weight(1f).fillMaxWidth()) {
-            DriveSpeedPanel(theme, telemetry, animating, Modifier.weight(1.25f).fillMaxHeight())
+            CockpitSpeedPanel(theme, telemetry, state, Modifier.weight(1.25f).fillMaxHeight())
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f).fillMaxHeight()) {
-                DriveRadioCard(theme, onRadio, Modifier.height(84.dp).fillMaxWidth())
+                CockpitRadioCard(theme, env.onRadio, Modifier.height(84.dp).fillMaxWidth())
                 Spacer(Modifier.height(12.dp))
-                DriveWhereTo(theme, telemetry, Modifier.weight(1f).fillMaxWidth())
+                CockpitWhereTo(theme, telemetry, Modifier.weight(1f).fillMaxWidth())
             }
         }
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth().height(86.dp)) {
-            DriveWeather(theme, weather, Modifier.weight(0.8f).fillMaxHeight())
+            CockpitWeather(theme, env, Modifier.weight(0.8f).fillMaxHeight())
             Spacer(Modifier.width(14.dp))
-            DriveDock(theme, onRadio, onRadioLong, onApps, Modifier.weight(1.3f).fillMaxHeight())
+            CockpitDock(theme, env, Modifier.weight(1.3f).fillMaxHeight())
         }
     }
 }
@@ -145,37 +186,42 @@ private fun Glass(
 /* ================= TOP BAR ================= */
 
 @Composable
-private fun DriveTopBar(
-    theme: CarTheme,
-    animating: Boolean,
-    onAnimating: () -> Unit,
-    onTheme: () -> Unit,
-    onSettings: () -> Unit
-) {
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
-    val timeFmt = remember { SimpleDateFormat("hh:mm", Locale.ENGLISH) }
-    val ampmFmt = remember { SimpleDateFormat("a", Locale.ENGLISH) }
-    val dateFmt = remember { SimpleDateFormat("EEE, MMM d", Locale.ENGLISH) }
-
+private fun CockpitTopBar(theme: CarTheme, state: LauncherState, onSettings: () -> Unit) {
     Row(Modifier.fillMaxWidth().height(46.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(timeFmt.format(Date(now)), color = theme.text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.width(8.dp))
-        Text(ampmFmt.format(Date(now)), color = theme.text, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-        Spacer(Modifier.width(12.dp))
-        Text(dateFmt.format(Date(now)), color = theme.text, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+        CockpitClock(theme)
         Spacer(Modifier.weight(1f))
 
-        TopIcon(if (animating) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-            if (animating) theme.accent else theme.subText, onAnimating)
+        TopIcon(
+            if (state.animating) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+            if (state.animating) theme.accent else theme.subText,
+            state::toggleAnimating
+        )
         Spacer(Modifier.width(18.dp))
-        TopIcon(Icons.Filled.NightsStay, theme.text, onTheme)
+        TopIcon(Icons.Filled.NightsStay, theme.text, state::toggleNight)
         Spacer(Modifier.width(18.dp))
         TopIcon(Icons.Filled.Settings, theme.text, onSettings)
         Spacer(Modifier.width(18.dp))
         Icon(Icons.Filled.Wifi, null, tint = theme.text, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(10.dp))
         Icon(Icons.Filled.SignalCellularAlt, null, tint = theme.subText, modifier = Modifier.size(18.dp))
+    }
+}
+
+/** Only the clock recomposes each second. */
+@Composable
+private fun CockpitClock(theme: CarTheme) {
+    val now = rememberNow()
+    val timeFmt = remember { SimpleDateFormat("hh:mm", Locale.ENGLISH) }
+    val ampmFmt = remember { SimpleDateFormat("a", Locale.ENGLISH) }
+    val dateFmt = remember { SimpleDateFormat("EEE, MMM d", Locale.ENGLISH) }
+    val d = Date(now.value)
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(timeFmt.format(d), color = theme.text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width(8.dp))
+        Text(ampmFmt.format(d), color = theme.text, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(dateFmt.format(d), color = theme.text, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
     }
 }
 
@@ -190,115 +236,152 @@ private fun TopIcon(icon: ImageVector, tint: Color, onClick: () -> Unit) {
 /* ================= SPEEDOMETER ================= */
 
 @Composable
-private fun DriveSpeedPanel(theme: CarTheme, t: Telemetry, animating: Boolean, modifier: Modifier) {
+private fun CockpitSpeedPanel(theme: CarTheme, t: Telemetry, state: LauncherState, modifier: Modifier) {
     Box(modifier) {
-        DriveGauge(theme, t.speed, Modifier.fillMaxSize())
+        CockpitGauge(theme, { t.speed }, Modifier.fillMaxSize())
         Column(
             Modifier.align(Alignment.Center).offset(y = (-14).dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("${t.speed}", color = theme.text, fontSize = 68.sp, fontWeight = FontWeight.Bold)
+            BigSpeed(theme, t)
             Text("km/h", color = theme.subText, fontSize = 15.sp)
         }
         CarImage(
             theme,
             Modifier.align(Alignment.BottomCenter).fillMaxWidth(0.72f).fillMaxHeight(0.36f),
             lightsOn = theme.name == "NIGHT",
-            animating = animating,
-            gpsSpeed = t.speed
+            animating = state.animating,
+            gpsSpeed = { t.speed }
         )
     }
 }
 
 @Composable
-private fun DriveGauge(theme: CarTheme, speed: Int, modifier: Modifier, max: Int = 240) {
-    val startAngle = 140f
-    val sweepAngle = 260f
-    val shown by animateFloatAsState(
-        targetValue = speed.coerceIn(0, max).toFloat(),
-        animationSpec = tween(600),
-        label = "driveGaugeSpeed"
-    )
+private fun BigSpeed(theme: CarTheme, t: Telemetry) {
+    Text("${t.speed}", color = theme.text, fontSize = 68.sp, fontWeight = FontWeight.Bold)
+}
+
+// gauge geometry shared by the static and the animated layer
+private const val G_START = 140f
+private const val G_SWEEP = 260f
+private const val G_TICKS = 60
+private const val G_SEGMENTS = 72
+
+@Composable
+private fun CockpitGauge(theme: CarTheme, speed: () -> Int, modifier: Modifier, max: Int = 240) {
+    val shown = rememberSmoothValue(600) { speed().coerceIn(0, max).toFloat() }
     val night = theme.name == "NIGHT"
     val tint = if (night) Color.White else Color.Black
 
     BoxWithConstraints(modifier) {
         val d = minOf(maxWidth, maxHeight)
         Box(Modifier.size(d).align(Alignment.Center)) {
+
+            // Static layer: disc, track and grey ticks. Cached, never redrawn while speed changes.
+            Box(
+                Modifier.fillMaxSize().drawWithCache {
+                    val inset = 16.dp.toPx()
+                    val r = size.minDimension / 2 - inset
+                    val c = Offset(size.width / 2, size.height / 2)
+                    val discBrush = Brush.radialGradient(
+                        listOf(Color.Black.copy(alpha = if (night) 0.55f else 0.06f), Color.Transparent),
+                        center = c, radius = r
+                    )
+                    val trackStroke = Stroke(2.dp.toPx(), cap = StrokeCap.Round)
+                    val topLeft = Offset(inset, inset)
+                    val arcSize = Size(r * 2, r * 2)
+                    val outer = r - 12.dp.toPx()
+                    val majorLen = 10.dp.toPx()
+                    val minorLen = 5.dp.toPx()
+                    val majorW = 2.dp.toPx()
+                    val minorW = 1.dp.toPx()
+                    val tickColor = tint.copy(alpha = 0.55f)
+
+                    onDrawBehind {
+                        drawCircle(discBrush, radius = r * 0.95f, center = c)
+                        drawArc(tint.copy(alpha = 0.45f), G_START, G_SWEEP, false, topLeft, arcSize, style = trackStroke)
+                        for (i in 0..G_TICKS) {
+                            val a = Math.toRadians((G_START + G_SWEEP * i / G_TICKS).toDouble())
+                            val major = i % 5 == 0
+                            val inner = outer - if (major) majorLen else minorLen
+                            val cs = cos(a).toFloat()
+                            val sn = sin(a).toFloat()
+                            drawLine(
+                                tickColor,
+                                c + Offset(cs * outer, sn * outer),
+                                c + Offset(cs * inner, sn * inner),
+                                strokeWidth = if (major) majorW else minorW
+                            )
+                        }
+                    }
+                }
+            )
+
+            // Animated layer: only the active part is drawn.
             Canvas(Modifier.fillMaxSize()) {
+                val frac = shown.value / max
+                val activeN = (G_SEGMENTS * frac).toInt()
+                if (activeN <= 0) return@Canvas
+
                 val inset = 16.dp.toPx()
                 val r = size.minDimension / 2 - inset
                 val c = Offset(size.width / 2, size.height / 2)
                 val topLeft = Offset(inset, inset)
                 val arcSize = Size(r * 2, r * 2)
-                val frac = shown / max
+                val per = G_SWEEP / G_SEGMENTS
+                val base = 18.dp.toPx()
 
-                // dark inner disc
-                drawCircle(
-                    Brush.radialGradient(
-                        listOf(Color.Black.copy(alpha = if (night) 0.55f else 0.06f), Color.Transparent),
-                        center = c, radius = r
-                    ),
-                    radius = r * 0.95f, center = c
-                )
-
-                // thin full track (the grey arc on the right side in the image)
-                drawArc(
-                    tint.copy(alpha = 0.45f), startAngle, sweepAngle, false, topLeft, arcSize,
-                    style = Stroke(2.dp.toPx(), cap = StrokeCap.Round)
-                )
-
-                // red tapered arc: thick at 0, thin at the tip, with glow
-                val n = 100
-                val activeN = (n * frac).toInt()
-                if (activeN > 0) {
-                    val per = sweepAngle / n
-                    for (i in 0 until activeN) {
-                        val w = 18.dp.toPx() * (1f - 0.72f * (i / n.toFloat()))
-                        drawArc(
-                            theme.accent.copy(alpha = 0.16f), startAngle + i * per, per + 0.8f, false,
-                            topLeft, arcSize, style = Stroke(w * 2.8f)
-                        )
-                    }
-                    for (i in 0 until activeN) {
-                        val w = 18.dp.toPx() * (1f - 0.72f * (i / n.toFloat()))
-                        drawArc(
-                            theme.accent, startAngle + i * per, per + 0.8f, false,
-                            topLeft, arcSize, style = Stroke(w)
-                        )
-                    }
+                // glow, then the sharp tapered arc (thick at 0, thin at the tip)
+                for (i in 0 until activeN) {
+                    val w = base * (1f - 0.72f * (i / G_SEGMENTS.toFloat()))
+                    drawArc(
+                        theme.accent.copy(alpha = 0.16f), G_START + i * per, per + 0.8f, false,
+                        topLeft, arcSize, style = Stroke(w * 2.8f)
+                    )
+                }
+                for (i in 0 until activeN) {
+                    val w = base * (1f - 0.72f * (i / G_SEGMENTS.toFloat()))
+                    drawArc(
+                        theme.accent, G_START + i * per, per + 0.8f, false,
+                        topLeft, arcSize, style = Stroke(w)
+                    )
                 }
 
-                // tick marks
-                val ticks = 60
-                for (i in 0..ticks) {
-                    val a = Math.toRadians((startAngle + sweepAngle * i / ticks).toDouble())
+                // active ticks in accent colour
+                val outer = r - 12.dp.toPx()
+                for (i in 0..G_TICKS) {
+                    if (i / G_TICKS.toFloat() > frac) break
+                    val a = Math.toRadians((G_START + G_SWEEP * i / G_TICKS).toDouble())
                     val major = i % 5 == 0
-                    val outer = r - 12.dp.toPx()
                     val inner = outer - if (major) 10.dp.toPx() else 5.dp.toPx()
                     val cs = cos(a).toFloat()
                     val sn = sin(a).toFloat()
                     drawLine(
-                        color = if (i / ticks.toFloat() <= frac) theme.accent else tint.copy(alpha = 0.55f),
-                        start = c + Offset(cs * outer, sn * outer),
-                        end = c + Offset(cs * inner, sn * inner),
+                        theme.accent,
+                        c + Offset(cs * outer, sn * outer),
+                        c + Offset(cs * inner, sn * inner),
                         strokeWidth = if (major) 2.dp.toPx() else 1.dp.toPx()
                     )
                 }
             }
 
-            // numbers 0..240 every 20
-            val rad = d / 2 - 16.dp - 12.dp - 28.dp
-            for (i in 0..12) {
-                val a = Math.toRadians(startAngle + sweepAngle * i / 12.0)
-                Text(
-                    "${i * 20}", color = theme.text.copy(alpha = 0.9f), fontSize = 13.sp,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(x = rad * cos(a).toFloat(), y = rad * sin(a).toFloat())
-                )
-            }
+            GaugeNumbers(theme, d)
         }
+    }
+}
+
+/** Does not read speed, so it is skipped on recomposition. */
+@Composable
+private fun BoxScope.GaugeNumbers(theme: CarTheme, d: Dp) {
+    val rad = d / 2 - 16.dp - 12.dp - 28.dp
+    for (i in 0..12) {
+        val a = Math.toRadians(G_START + G_SWEEP * i / 12.0)
+        Text(
+            "${i * 20}", color = theme.text.copy(alpha = 0.9f), fontSize = 13.sp,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .offset(x = rad * cos(a).toFloat(), y = rad * sin(a).toFloat())
+        )
     }
 }
 
@@ -313,11 +396,7 @@ private val RADIO_PRESETS = listOf(
 )
 
 @Composable
-private fun DriveRadioCard(
-    theme: CarTheme,
-    onRadio: () -> Unit,
-    modifier: Modifier
-) {
+private fun CockpitRadioCard(theme: CarTheme, onRadio: () -> Unit, modifier: Modifier) {
     var freq by remember { mutableFloatStateOf(87.5f) }
 
     // Fine tuning: 0.1 MHz per step, wraps around at the band ends
@@ -328,7 +407,7 @@ private fun DriveRadioCard(
         freq = f
     }
 
-    // Scan: jump to the next or previous station in the list, wraps around
+    // Scan: jump to the next or previous preset, wraps around
     fun seek(forward: Boolean) {
         val eps = 0.05f
         freq = if (forward) {
@@ -345,7 +424,7 @@ private fun DriveRadioCard(
                 Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .drawBehind {
+                    .drawWithCache {
                         val w = size.width
                         val h = size.height
                         val swoosh = Path().apply {
@@ -355,15 +434,17 @@ private fun DriveRadioCard(
                         val brush = Brush.horizontalGradient(
                             listOf(Color.Transparent, theme.accent.copy(alpha = 0.9f), Color.Transparent)
                         )
-                        drawPath(swoosh, brush, style = Stroke(10.dp.toPx(), cap = StrokeCap.Round), alpha = 0.18f)
-                        drawPath(swoosh, brush, style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
+                        val wide = Stroke(10.dp.toPx(), cap = StrokeCap.Round)
+                        val thin = Stroke(2.dp.toPx(), cap = StrokeCap.Round)
+                        onDrawBehind {
+                            drawPath(swoosh, brush, style = wide, alpha = 0.18f)
+                            drawPath(swoosh, brush, style = thin)
+                        }
                     },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Scan back (round)
                 RadioRoundButton(theme, Icons.Filled.SkipPrevious) { seek(false) }
                 Spacer(Modifier.width(6.dp))
-                // -0.1 (square)
                 RadioSquareButton(theme, Icons.Filled.ChevronLeft,
                     onStep = { step(-0.1f) }, onBigStep = { step(-1f) })
 
@@ -386,11 +467,9 @@ private fun DriveRadioCard(
                         modifier = Modifier.padding(top = 8.dp))
                 }
 
-                // +0.1 (square)
                 RadioSquareButton(theme, Icons.Filled.ChevronRight,
                     onStep = { step(0.1f) }, onBigStep = { step(1f) })
                 Spacer(Modifier.width(6.dp))
-                // Scan next (round)
                 RadioRoundButton(theme, Icons.Filled.SkipNext) { seek(true) }
             }
 
@@ -409,9 +488,7 @@ private fun DriveRadioCard(
                     Modifier
                         .fillMaxWidth(frac)
                         .fillMaxHeight()
-                        .background(
-                            Brush.horizontalGradient(listOf(theme.accent.copy(alpha = 0.3f), theme.accent))
-                        )
+                        .background(Brush.horizontalGradient(listOf(theme.accent.copy(alpha = 0.3f), theme.accent)))
                 )
             }
         }
@@ -465,9 +542,8 @@ private fun RadioSquareButton(
 /* ================= WHERE TO & LIVE NAVIGATION ================= */
 
 @Composable
-private fun DriveWhereTo(theme: CarTheme, telemetry: Telemetry, modifier: Modifier) {
+private fun CockpitWhereTo(theme: CarTheme, telemetry: Telemetry, modifier: Modifier) {
     val ctx = LocalContext.current
-    val currentLocation = LatLng(telemetry.latitude, telemetry.longitude)
 
     val mapView = remember {
         MapView(ctx).apply {
@@ -477,8 +553,7 @@ private fun DriveWhereTo(theme: CarTheme, telemetry: Telemetry, modifier: Modifi
             } catch (_: Exception) {}
         }
     }
-
-    DisposableEffect(Unit) {
+    DisposableEffect(mapView) {
         onDispose {
             try {
                 mapView.onPause()
@@ -487,37 +562,39 @@ private fun DriveWhereTo(theme: CarTheme, telemetry: Telemetry, modifier: Modifi
         }
     }
 
-    var googleMapInstance by remember { mutableStateOf<com.google.android.gms.maps.GoogleMap?>(null) }
+    var map by remember { mutableStateOf<GoogleMap?>(null) }
 
     LaunchedEffect(mapView) {
         try {
-            mapView.getMapAsync { map ->
-                googleMapInstance = map
-                map.uiSettings.isZoomControlsEnabled = false
-                map.uiSettings.isCompassEnabled = false
-                map.uiSettings.isMyLocationButtonEnabled = false
-                map.uiSettings.isMapToolbarEnabled = false
-                try {
-                    map.isMyLocationEnabled = true
-                } catch (_: SecurityException) {}
+            mapView.getMapAsync { m ->
+                m.uiSettings.isZoomControlsEnabled = false
+                m.uiSettings.isCompassEnabled = false
+                m.uiSettings.isMyLocationButtonEnabled = false
+                m.uiSettings.isMapToolbarEnabled = false
+                try { m.isMyLocationEnabled = true } catch (_: SecurityException) {}
+                map = m
             }
         } catch (_: Exception) {}
     }
 
-    LaunchedEffect(currentLocation, googleMapInstance) {
-        googleMapInstance?.let { map ->
-            try {
-                val update = CameraUpdateFactory.newLatLngZoom(currentLocation, 15f)
-                map.animateCamera(update)
-                map.clear()
-                map.addMarker(
-                    MarkerOptions()
-                        .position(currentLocation)
-                        .title("Current Position")
-                        .snippet("${telemetry.speed} km/h")
-                )
-            } catch (_: Exception) {}
-        }
+    // Location is read in a snapshotFlow: GPS updates never recompose this card.
+    // One marker is created and then only moved.
+    LaunchedEffect(map) {
+        val m = map ?: return@LaunchedEffect
+        var marker: Marker? = null
+        snapshotFlow { Triple(telemetry.latitude, telemetry.longitude, telemetry.speed) }
+            .collect { (lat, lon, spd) ->
+                try {
+                    val pos = LatLng(lat, lon)
+                    m.animateCamera(CameraUpdateFactory.newLatLngZoom(pos, 15f))
+                    if (marker == null) {
+                        marker = m.addMarker(MarkerOptions().position(pos).title("Current Position"))
+                    } else {
+                        marker?.position = pos
+                    }
+                    marker?.snippet = "$spd km/h"
+                } catch (_: Exception) {}
+            }
     }
 
     Glass(theme, modifier, pad = 12.dp) {
@@ -533,7 +610,6 @@ private fun DriveWhereTo(theme: CarTheme, telemetry: Telemetry, modifier: Modifi
 
             Spacer(Modifier.height(6.dp))
 
-            // Live Google Map View container
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -541,10 +617,7 @@ private fun DriveWhereTo(theme: CarTheme, telemetry: Telemetry, modifier: Modifi
                     .clip(RoundedCornerShape(12.dp))
                     .border(1.dp, theme.track, RoundedCornerShape(12.dp))
             ) {
-                AndroidView(
-                    factory = { mapView },
-                    modifier = Modifier.fillMaxSize()
-                )
+                AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
             }
 
             Spacer(Modifier.height(8.dp))
@@ -566,12 +639,13 @@ private fun DriveWhereTo(theme: CarTheme, telemetry: Telemetry, modifier: Modifi
 
 @Composable
 private fun DestButton(theme: CarTheme, label: String, icon: ImageVector, modifier: Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
     Row(
         modifier
             .fillMaxHeight()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(shape)
             .background(theme.accent.copy(alpha = 0.22f))
-            .border(1.dp, theme.accent.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+            .border(1.dp, theme.accent.copy(alpha = 0.35f), shape)
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -585,7 +659,8 @@ private fun DestButton(theme: CarTheme, label: String, icon: ImageVector, modifi
 /* ================= WEATHER ================= */
 
 @Composable
-private fun DriveWeather(theme: CarTheme, state: WeatherState, modifier: Modifier) {
+private fun CockpitWeather(theme: CarTheme, env: DashboardEnv, modifier: Modifier) {
+    val state = env.weather
     val ok = (state as? WeatherState.Ok)?.data
     val sunny = ok == null || ok.condition == "Clear"
     Glass(theme, modifier, radius = 20.dp, pad = 12.dp) {
@@ -627,45 +702,42 @@ private fun DriveWeather(theme: CarTheme, state: WeatherState, modifier: Modifie
 
 /* ================= DOCK ================= */
 
-private data class DriveApp(val label: String, val icon: ImageVector, val color: Color)
+private class CockpitApp(val label: String, val icon: ImageVector, val color: Color)
+
+private val COCKPIT_APPS = listOf(
+    CockpitApp("Maps", Icons.Filled.Navigation, Color(0xFF2D6BFF)),
+    CockpitApp("Music", Icons.Filled.MusicNote, Color(0xFFF02B2B)),
+    CockpitApp("Phone", Icons.Filled.Phone, Color(0xFF22C55E)),
+    CockpitApp("Radio", Icons.Filled.Radio, Color(0xFF8B3FD9)),
+    CockpitApp("Apps", Icons.Filled.Apps, Color(0xFF5A5F6B))
+)
 
 @Composable
-private fun DriveDock(
-    theme: CarTheme,
-    onRadio: () -> Unit,
-    onRadioLong: () -> Unit,
-    onApps: () -> Unit,
-    modifier: Modifier
-) {
+private fun CockpitDock(theme: CarTheme, env: DashboardEnv, modifier: Modifier) {
     val ctx = LocalContext.current
-    val apps = listOf(
-        DriveApp("Maps", Icons.Filled.Navigation, Color(0xFF2D6BFF)),
-        DriveApp("Music", Icons.Filled.MusicNote, Color(0xFFF02B2B)),
-        DriveApp("Phone", Icons.Filled.Phone, Color(0xFF22C55E)),
-        DriveApp("Radio", Icons.Filled.Radio, Color(0xFF8B3FD9)),
-        DriveApp("Apps", Icons.Filled.Apps, Color(0xFF5A5F6B))
-    )
+    val iconShape = RoundedCornerShape(13.dp)
+
     Glass(theme, modifier, radius = 20.dp, pad = 6.dp) {
         Row(
             Modifier.fillMaxSize(),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            apps.forEach { app ->
+            COCKPIT_APPS.forEach { app ->
                 Column(
                     Modifier
                         .weight(1f)
                         .fillMaxHeight()
                         .pointerInput(app.label) {
                             detectTapGestures(
-                                onLongPress = { if (app.label == "Radio") onRadioLong() },
+                                onLongPress = { if (app.label == "Radio") env.onRadioLong() },
                                 onTap = {
                                     when (app.label) {
                                         "Maps" -> ctx.startSafely(Intent(Intent.ACTION_VIEW, "geo:0,0?q=".toUri()))
                                         "Music" -> launchByCategory(ctx, Intent.CATEGORY_APP_MUSIC)
                                         "Phone" -> ctx.startSafely(Intent(Intent.ACTION_DIAL))
-                                        "Radio" -> onRadio()
-                                        "Apps" -> onApps()
+                                        "Radio" -> env.onRadio()
+                                        "Apps" -> env.onApps()
                                     }
                                 }
                             )
@@ -676,9 +748,9 @@ private fun DriveDock(
                     Box(
                         Modifier
                             .size(44.dp)
-                            .clip(RoundedCornerShape(13.dp))
+                            .clip(iconShape)
                             .background(Brush.verticalGradient(listOf(lerp(app.color, Color.White, 0.25f), app.color)))
-                            .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(13.dp)),
+                            .border(1.dp, Color.White.copy(alpha = 0.25f), iconShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(app.icon, null, tint = Color.White, modifier = Modifier.size(24.dp))
