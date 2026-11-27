@@ -9,7 +9,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -37,6 +37,8 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,6 +71,7 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.sin
+import kotlin.math.cos
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -145,6 +148,7 @@ fun LauncherApp() {
                 .shadow(24.dp, RoundedCornerShape(28.dp), ambientColor = theme.glow, spotColor = theme.glow)
                 .clip(RoundedCornerShape(28.dp))
                 .background(theme.background)
+                .dashboardBackground(theme, night)
                 .border(BorderStroke(2.dp, theme.glow), RoundedCornerShape(28.dp))
                 .padding(18.dp)
         ) {
@@ -165,7 +169,6 @@ fun LauncherApp() {
                     DriveHome(
                         theme = theme,
                         telemetry = telemetry,
-                        media = media,
                         weather = weather,
                         animating = animating,
                         onAnimating = {
@@ -191,7 +194,6 @@ fun LauncherApp() {
                                 animating = !animating
                                 prefs.edit().putBoolean("animating", animating).apply()
                             },
-                            onRadio = openRadio,
                             onTheme = {
                                 night = !night
                                 prefs.edit().putBoolean("night", night).apply()
@@ -208,13 +210,15 @@ fun LauncherApp() {
                                     Spacer(Modifier.width(14.dp))
                                     WeatherCard(theme, weather, Modifier.weight(1f).fillMaxHeight())
                                 }
-                                CarImage(
-                                    theme,
-                                    Modifier.weight(1f).fillMaxWidth(),
-                                    lightsOn = night,
-                                    animating = animating,
-                                    gpsSpeed = telemetry.speed
-                                )
+                                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
+                                    CarImage(
+                                        theme,
+                                        Modifier.fillMaxWidth().fillMaxHeight(0.75f),   // 75% of the old size
+                                        lightsOn = night,
+                                        animating = animating,
+                                        gpsSpeed = telemetry.speed
+                                    )
+                                }
                             }
                         }
                         Spacer(Modifier.height(12.dp))
@@ -262,7 +266,6 @@ fun TopBar(
     animating: Boolean,
     ownerName: String,
     onAnimating: () -> Unit,
-    onRadio: () -> Unit,
     onTheme: () -> Unit,
     onSettings: () -> Unit
 ) {
@@ -309,10 +312,6 @@ fun TopBar(
                     tint = if (animating) theme.accent else theme.subText,
                     modifier = Modifier.size(22.dp)
                 )
-            }
-            Spacer(Modifier.width(10.dp))
-            PillButton(theme, onClick = onRadio) {
-                Icon(Icons.Filled.Radio, null, tint = theme.text, modifier = Modifier.size(22.dp))
             }
             Spacer(Modifier.width(10.dp))
             PillButton(theme, onClick = onSettings) {
@@ -395,34 +394,46 @@ fun SettingsPopup(
                 )
             }
 
-            // Section 1: Pick a theme
+            // Section 1: Pick a theme (horizontal list)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("1. Pick a Theme", color = theme.subText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                listOf(
-                    Triple("demo", "Demo Style", "Default launcher theme"),
-                    Triple("drive", "Drive Style", "Big speedometer, Where to? card")
-                ).forEach { (id, name, desc) ->
-                    val sel = style == id
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (sel) theme.accent.copy(alpha = 0.12f) else theme.background)
-                            .border(
-                                if (sel) 2.dp else 1.dp,
-                                if (sel) theme.accent else theme.track,
-                                RoundedCornerShape(12.dp)
-                            )
-                            .clickable { onStyleSelected(id) }
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column {
-                            Text(name, color = theme.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            Text(desc, color = theme.subText, fontSize = 11.sp)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    listOf(
+                        Triple("demo", "Default", "Classic dashboard"),
+                        Triple("drive", "Cockpit", "Big speedo & map")
+                    ).forEach { (id, name, desc) ->
+                        val sel = style == id
+                        val icon = if (id == "demo") Icons.Filled.Dashboard else Icons.Filled.Speed
+                        Column(
+                            Modifier
+                                .width(140.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (sel) theme.accent.copy(alpha = 0.12f) else theme.background)
+                                .border(
+                                    if (sel) 2.dp else 1.dp,
+                                    if (sel) theme.accent else theme.track,
+                                    RoundedCornerShape(14.dp)
+                                )
+                                .clickable { onStyleSelected(id) }
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(icon, null, tint = if (sel) theme.accent else theme.text, modifier = Modifier.size(22.dp))
+                                if (sel) Icon(Icons.Filled.CheckCircle, null, tint = theme.accent, modifier = Modifier.size(16.dp))
+                            }
+                            Text(name, color = theme.text, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text(desc, color = theme.subText, fontSize = 11.sp, maxLines = 1)
                         }
-                        if (sel) Text("Active", color = theme.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -706,7 +717,7 @@ fun CarImage(
     var wasOff by remember { mutableStateOf(false) }
     var wasPaused by remember { mutableStateOf(false) }
 
-    val accelerate = CubicBezierEasing(0.55f, 0f, 0.9f, 0.5f)
+    val accelerate = FastOutSlowInEasing
 
     LaunchedEffect(theme.carImage, animating) {
         if (!animating) {
@@ -1121,6 +1132,154 @@ fun AppDrawer(
                 }
             }
         }
+    }
+}
+/* ---------------- BACKGROUND LINES ---------------- */
+/* ---------------- BACKGROUND: shapes + lines + gradients ---------------- */
+
+private fun hexPath(cx: Float, cy: Float, r: Float): Path = Path().apply {
+    for (i in 0..5) {
+        val a = Math.toRadians(60.0 * i - 30.0)
+        val x = cx + r * cos(a).toFloat()
+        val y = cy + r * sin(a).toFloat()
+        if (i == 0) moveTo(x, y) else lineTo(x, y)
+    }
+    close()
+}
+
+fun Modifier.dashboardBackground(theme: CarTheme, night: Boolean): Modifier = drawBehind {
+    val w = size.width
+    val h = size.height
+    val k = if (night) 1f else 0.55f
+    val tint = if (night) Color.White else Color.Black
+    val full = Size(w, h)
+
+    // 1) Large soft gradient glows
+    drawRect(
+        Brush.radialGradient(
+            listOf(theme.accent.copy(alpha = 0.30f * k), Color.Transparent),
+            center = Offset(w * 0.88f, h * 0.12f), radius = w * 0.55f
+        ), size = full
+    )
+    drawRect(
+        Brush.radialGradient(
+            listOf(theme.accent.copy(alpha = 0.20f * k), Color.Transparent),
+            center = Offset(w * 0.08f, h * 0.92f), radius = w * 0.5f
+        ), size = full
+    )
+    drawRect(
+        Brush.radialGradient(
+            listOf(tint.copy(alpha = 0.05f * k), Color.Transparent),
+            center = Offset(w * 0.5f, h * 0.5f), radius = w * 0.7f
+        ), size = full
+    )
+
+    // 2) Slanted translucent bands
+    val band1 = Path().apply {
+        moveTo(w * 0.58f, 0f); lineTo(w * 0.80f, 0f)
+        lineTo(w * 0.38f, h); lineTo(w * 0.16f, h); close()
+    }
+    drawPath(
+        band1,
+        Brush.linearGradient(
+            listOf(theme.accent.copy(alpha = 0.12f * k), Color.Transparent),
+            start = Offset(w * 0.7f, 0f), end = Offset(w * 0.25f, h)
+        )
+    )
+    val band2 = Path().apply {
+        moveTo(w * 0.86f, 0f); lineTo(w * 0.92f, 0f)
+        lineTo(w * 0.50f, h); lineTo(w * 0.44f, h); close()
+    }
+    drawPath(
+        band2,
+        Brush.linearGradient(
+            listOf(tint.copy(alpha = 0.06f * k), Color.Transparent),
+            start = Offset(w * 0.9f, 0f), end = Offset(w * 0.47f, h)
+        )
+    )
+
+    // 3) Concentric rings (bottom right corner)
+    for (i in 1..6) {
+        drawCircle(
+            color = theme.accent.copy(alpha = 0.22f * k * (1f - i / 7f)),
+            radius = h * (0.14f + 0.13f * i),
+            center = Offset(w * 0.95f, h * 1.0f),
+            style = Stroke(1.2.dp.toPx())
+        )
+    }
+
+    // 4) Flowing gradient curves
+    // startY, control1Y, control2Y, endY, alpha, stroke(dp)
+    val lines = listOf(
+        floatArrayOf(0.20f, 0.05f, 0.55f, 0.35f, 0.35f, 1.5f),
+        floatArrayOf(0.35f, 0.15f, 0.75f, 0.50f, 0.22f, 1.2f),
+        floatArrayOf(0.55f, 0.40f, 0.95f, 0.70f, 0.30f, 1.8f),
+        floatArrayOf(0.75f, 0.60f, 1.10f, 0.88f, 0.18f, 1.0f),
+        floatArrayOf(0.95f, 0.80f, 1.25f, 1.00f, 0.25f, 1.4f)
+    )
+    lines.forEach { l ->
+        val path = Path().apply {
+            moveTo(0f, h * l[0])
+            cubicTo(w * 0.30f, h * l[1], w * 0.65f, h * l[2], w, h * l[3])
+        }
+        val brush = Brush.horizontalGradient(
+            listOf(
+                Color.Transparent,
+                theme.accent.copy(alpha = l[4] * k),
+                tint.copy(alpha = l[4] * 0.35f * k),
+                Color.Transparent
+            ),
+            startX = 0f, endX = w
+        )
+        drawPath(path, brush, style = Stroke(l[5].dp.toPx() * 6f, cap = StrokeCap.Round), alpha = 0.22f)
+        drawPath(path, brush, style = Stroke(l[5].dp.toPx(), cap = StrokeCap.Round))
+    }
+
+    // 5) Dot grid (top left, fades out)
+    val gap = 22.dp.toPx()
+    val dotR = 1.6.dp.toPx()
+    val gridW = w * 0.26f
+    val gridH = h * 0.30f
+    var gy = gap
+    while (gy < gridH) {
+        var gx = gap
+        while (gx < gridW) {
+            val fade = (1f - (gx / gridW) * 0.6f - (gy / gridH) * 0.6f).coerceIn(0f, 1f)
+            drawCircle(tint.copy(alpha = 0.28f * k * fade), dotR, Offset(gx, gy))
+            gx += gap
+        }
+        gy += gap
+    }
+
+    // 6) Outlined hexagons
+    drawPath(
+        hexPath(w * 0.50f, h * 0.10f, h * 0.10f),
+        theme.accent.copy(alpha = 0.28f * k),
+        style = Stroke(1.2.dp.toPx())
+    )
+    drawPath(
+        hexPath(w * 0.545f, h * 0.18f, h * 0.06f),
+        tint.copy(alpha = 0.14f * k),
+        style = Stroke(1.dp.toPx())
+    )
+    drawPath(
+        hexPath(w * 0.06f, h * 0.55f, h * 0.08f),
+        theme.accent.copy(alpha = 0.22f * k),
+        style = Stroke(1.dp.toPx())
+    )
+
+    // 7) Short accent dashes (tech look)
+    for (i in 0 until 5) {
+        val y = h * (0.30f + 0.045f * i)
+        val len = w * (0.05f + 0.02f * (i % 3))
+        drawLine(
+            Brush.horizontalGradient(
+                listOf(theme.accent.copy(alpha = 0.35f * k), Color.Transparent),
+                startX = w * 0.02f, endX = w * 0.02f + len
+            ),
+            start = Offset(w * 0.02f, y), end = Offset(w * 0.02f + len, y),
+            strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round
+        )
     }
 }
 

@@ -6,6 +6,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -17,6 +18,8 @@ class Telemetry(private val ctx: Context) : LocationListener {
     var heading by mutableStateOf("N")
     var tripKm by mutableFloatStateOf(0f)
     var driveMin by mutableIntStateOf(0)
+    var latitude by mutableDoubleStateOf(6.9271)
+    var longitude by mutableDoubleStateOf(79.8612)
 
     private var last: Location? = null
     private var lastFix = 0L
@@ -39,6 +42,8 @@ class Telemetry(private val ctx: Context) : LocationListener {
 
     override fun onLocationChanged(l: Location) {
         lastFix = System.currentTimeMillis()
+        latitude = l.latitude
+        longitude = l.longitude
 
         // Ignore GPS noise when parked (readings under 3 km/h count as stopped)
         val kmh = (l.speed * 3.6f).roundToInt()
